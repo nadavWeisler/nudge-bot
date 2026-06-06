@@ -98,6 +98,12 @@ def get_stats():
     return db.stats()
 
 
+@app.get("/api/users")
+def get_users():
+    db.init_db()
+    return db.list_users()
+
+
 @app.get("/api/tasks")
 def get_tasks(status: str = "open"):
     db.init_db()
