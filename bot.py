@@ -503,6 +503,7 @@ def main():
 
     async def post_init(application):
         await application.bot.set_my_commands([
+            BotCommand("start",   "🏠 Show main menu"),
             BotCommand("list",    "📋 Open tasks grouped by assignee"),
             BotCommand("mine",    "👤 Tasks assigned to you"),
             BotCommand("theirs",  "👥 Tasks assigned to others"),
