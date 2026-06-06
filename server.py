@@ -22,25 +22,49 @@ app = FastAPI(title="NudgeBot Dashboard")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-ENV_KEYS = ["BOT_TOKEN", "ALLOWED_CHAT_IDS", "NUDGE_HOUR", "NUDGE_MINUTE"]
+ENV_KEYS = ["BOT_TOKEN", "ALLOWED_CHAT_IDS", "NUDGE_SCHEDULES"]
+
+
+def _split(raw: str) -> list[str]:
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 def read_env() -> dict:
-    result = {k: "" for k in ENV_KEYS}
+    raw = {k: "" for k in ENV_KEYS}
     if not ENV_PATH.exists():
-        return result
+        return raw
     for line in ENV_PATH.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
         if key in ENV_KEYS:
-            result[key] = val.strip()
-    return result
+            raw[key] = val.strip()
+        # backwards compat: fold old NUDGE_HOUR/NUDGE_MINUTE into NUDGE_SCHEDULES
+        if key == "NUDGE_HOUR" and not raw.get("NUDGE_SCHEDULES"):
+            raw["_nudge_hour"] = val.strip()
+        if key == "NUDGE_MINUTE" and not raw.get("NUDGE_SCHEDULES"):
+            raw["_nudge_minute"] = val.strip()
+
+    if not raw["NUDGE_SCHEDULES"] and raw.get("_nudge_hour"):
+        h = raw.pop("_nudge_hour", "8").zfill(2)
+        m = raw.pop("_nudge_minute", "0").zfill(2)
+        raw["NUDGE_SCHEDULES"] = f"{h}:{m}"
+
+    return {
+        "bot_token": raw["BOT_TOKEN"],
+        "chat_ids": _split(raw["ALLOWED_CHAT_IDS"]),
+        "nudge_schedules": _split(raw["NUDGE_SCHEDULES"]) or ["08:00"],
+    }
 
 
 def write_env(data: dict):
     """Write only managed keys; preserve comments and other lines."""
+    flat = {
+        "BOT_TOKEN": data.get("bot_token", ""),
+        "ALLOWED_CHAT_IDS": ",".join(data.get("chat_ids", [])),
+        "NUDGE_SCHEDULES": ",".join(data.get("nudge_schedules", [])),
+    }
     lines = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
     written = set()
 
@@ -51,16 +75,17 @@ def write_env(data: dict):
             new_lines.append(line)
             continue
         key = stripped.split("=", 1)[0].strip()
-        if key in data:
-            new_lines.append(f"{key}={data[key]}")
+        if key in flat:
+            new_lines.append(f"{key}={flat[key]}")
             written.add(key)
+        elif key in ("NUDGE_HOUR", "NUDGE_MINUTE"):
+            pass  # drop old keys
         else:
             new_lines.append(line)
 
-    # Append any keys not already in file
-    for key in ENV_KEYS:
-        if key not in written and key in data:
-            new_lines.append(f"{key}={data[key]}")
+    for key, val in flat.items():
+        if key not in written:
+            new_lines.append(f"{key}={val}")
 
     ENV_PATH.write_text("\n".join(new_lines) + "\n")
 
@@ -122,10 +147,9 @@ def get_settings():
 
 
 class SettingsBody(BaseModel):
-    BOT_TOKEN: str = ""
-    ALLOWED_CHAT_IDS: str = ""
-    NUDGE_HOUR: str = "8"
-    NUDGE_MINUTE: str = "0"
+    bot_token: str = ""
+    chat_ids: list[str] = []
+    nudge_schedules: list[str] = []
 
 
 @app.post("/api/settings")
@@ -139,9 +163,9 @@ async def send_nudge():
     """Fire a nudge via the Telegram Bot API directly (no running bot needed)."""
     import httpx
     cfg = read_env()
-    token = cfg.get("BOT_TOKEN", "")
-    raw_ids = cfg.get("ALLOWED_CHAT_IDS", "")
-    chat_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
+    cfg = read_env()
+    token = cfg.get("bot_token", "")
+    chat_ids = cfg.get("chat_ids", [])
     if not token or not chat_ids:
         raise HTTPException(400, "BOT_TOKEN and ALLOWED_CHAT_IDS must be set")
 

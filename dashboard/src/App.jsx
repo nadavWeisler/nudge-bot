@@ -134,10 +134,45 @@ function TasksTab() {
 }
 
 // ── Settings tab ──────────────────────────────────────────────────────────────
+function ListEditor({ label, items, onChange, placeholder, validate }) {
+  const [draft, setDraft] = useState('');
+  const [err, setErr] = useState('');
+
+  function add() {
+    const v = draft.trim();
+    if (!v) return;
+    if (validate) { const msg = validate(v); if (msg) { setErr(msg); return; } }
+    if (items.includes(v)) { setErr('Already in list'); return; }
+    onChange([...items, v]);
+    setDraft(''); setErr('');
+  }
+
+  return (
+    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+      <label className="label">{label}</label>
+      {items.map((item, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <span style={{
+            flex: 1, background: 'var(--bg3)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius)', padding: '7px 12px', fontSize: 13,
+          }}>{item}</span>
+          <button type="button" className="btn btn-danger" style={{ padding: '4px 10px' }}
+            onClick={() => onChange(items.filter((_, j) => j !== i))}>✕</button>
+        </div>
+      ))}
+      <div className="form-row" style={{ margin: 0, marginTop: items.length ? 6 : 0 }}>
+        <input className="input" placeholder={placeholder} value={draft}
+          onChange={e => { setDraft(e.target.value); setErr(''); }}
+          onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), add())} />
+        <button type="button" className="btn btn-primary" onClick={add} style={{ flexShrink: 0 }}>+ Add</button>
+      </div>
+      {err && <span style={{ color: 'var(--danger)', fontSize: 12 }}>{err}</span>}
+    </div>
+  );
+}
+
 function SettingsTab() {
-  const [form, setForm] = useState({
-    BOT_TOKEN: '', ALLOWED_CHAT_IDS: '', NUDGE_HOUR: '8', NUDGE_MINUTE: '0',
-  });
+  const [form, setForm] = useState({ bot_token: '', chat_ids: [], nudge_schedules: [] });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [flash, setFlash] = useState(null);
@@ -146,7 +181,7 @@ function SettingsTab() {
   function notify(msg, type = 'success') { setFlash({ msg, type }); }
 
   useEffect(() => {
-    api('/api/settings').then(d => { setForm(f => ({ ...f, ...d })); setLoading(false); }).catch(() => setLoading(false));
+    api('/api/settings').then(d => { setForm(d); setLoading(false); }).catch(() => setLoading(false));
   }, []);
 
   async function save(e) {
@@ -162,23 +197,17 @@ function SettingsTab() {
   async function sendNudge() {
     try {
       await api('/api/nudge', { method: 'POST' });
-      notify('Nudge sent to Telegram! 📣');
+      notify('Nudge sent to all chats! 📣');
     } catch (err) { notify(err.message, 'error'); }
   }
 
-  function field(key, label, opts = {}) {
-    return (
-      <div className="form-group">
-        <label className="label">{label}</label>
-        <input
-          className="input"
-          type={opts.type || 'text'}
-          value={form[key] ?? ''}
-          onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
-          placeholder={opts.placeholder || ''}
-        />
-      </div>
-    );
+  function validateChatId(v) {
+    if (!/^-?\d+$/.test(v)) return 'Must be a numeric ID (e.g. 123456789 or -1001234567890)';
+  }
+  function validateTime(v) {
+    if (!/^\d{1,2}:\d{2}$/.test(v)) return 'Use HH:MM format (e.g. 08:00)';
+    const [h, m] = v.split(':').map(Number);
+    if (h > 23 || m > 59) return 'Invalid time';
   }
 
   if (loading) return <p className="muted">Loading…</p>;
@@ -187,49 +216,49 @@ function SettingsTab() {
     <div>
       {flash && <Alert msg={flash.msg} type={flash.type} onClose={() => setFlash(null)} />}
       <form onSubmit={save}>
+
         <div className="card">
-          <h2>🤖 Bot</h2>
-          <div className="settings-grid">
-            <div className="form-group">
-              <label className="label">Bot Token</label>
-              <div className="form-row" style={{ margin: 0 }}>
-                <input
-                  className="input"
-                  type={showToken ? 'text' : 'password'}
-                  value={form.BOT_TOKEN ?? ''}
-                  onChange={e => setForm(f => ({ ...f, BOT_TOKEN: e.target.value }))}
-                  placeholder="123456:ABC…"
-                />
-                <button type="button" className="btn" onClick={() => setShowToken(v => !v)} style={{ flexShrink: 0 }}>
-                  {showToken ? '🙈' : '👁'}
-                </button>
-              </div>
+          <h2>🤖 Bot Token</h2>
+          <div className="form-group">
+            <label className="label">Token (from @BotFather)</label>
+            <div className="form-row" style={{ margin: 0 }}>
+              <input className="input" type={showToken ? 'text' : 'password'}
+                value={form.bot_token ?? ''}
+                onChange={e => setForm(f => ({ ...f, bot_token: e.target.value }))}
+                placeholder="123456:ABC…" />
+              <button type="button" className="btn" onClick={() => setShowToken(v => !v)} style={{ flexShrink: 0 }}>
+                {showToken ? '🙈' : '👁'}
+              </button>
             </div>
-            {field('ALLOWED_CHAT_IDS', 'Allowed Chat IDs (comma-separated)', { placeholder: 'e.g. 123456789, 987654321' })}
           </div>
         </div>
 
         <div className="card">
-          <h2>⏰ Daily Nudge</h2>
-          <p className="muted" style={{ marginBottom: 14 }}>Bot will send open tasks to the group at this time every day.</p>
-          <div className="settings-grid">
-            <div className="form-group">
-              <label className="label">Hour (0–23)</label>
-              <input
-                className="input" type="number" min="0" max="23"
-                value={form.NUDGE_HOUR ?? '8'}
-                onChange={e => setForm(f => ({ ...f, NUDGE_HOUR: e.target.value }))}
-              />
-            </div>
-            <div className="form-group">
-              <label className="label">Minute (0–59)</label>
-              <input
-                className="input" type="number" min="0" max="59"
-                value={form.NUDGE_MINUTE ?? '0'}
-                onChange={e => setForm(f => ({ ...f, NUDGE_MINUTE: e.target.value }))}
-              />
-            </div>
-          </div>
+          <h2>👥 Allowed Chat IDs</h2>
+          <p className="muted" style={{ marginBottom: 14 }}>
+            Add your Telegram user ID and your wife's. Send <code>/chatid</code> to the bot in DM to find yours.
+          </p>
+          <ListEditor
+            label="Chat IDs"
+            items={form.chat_ids}
+            onChange={ids => setForm(f => ({ ...f, chat_ids: ids }))}
+            placeholder="e.g. 123456789"
+            validate={validateChatId}
+          />
+        </div>
+
+        <div className="card">
+          <h2>⏰ Daily Nudge Schedules</h2>
+          <p className="muted" style={{ marginBottom: 14 }}>
+            Add one or more times — the bot sends all open tasks at each time every day.
+          </p>
+          <ListEditor
+            label="Nudge times"
+            items={form.nudge_schedules}
+            onChange={times => setForm(f => ({ ...f, nudge_schedules: times }))}
+            placeholder="HH:MM e.g. 08:00"
+            validate={validateTime}
+          />
         </div>
 
         <div style={{ display: 'flex', gap: 10 }}>
@@ -240,7 +269,7 @@ function SettingsTab() {
             📣 Send Nudge Now
           </button>
         </div>
-        <p className="muted" style={{ marginTop: 10 }}>⚠️ Restart the bot process after saving to apply changes.</p>
+        <p className="muted" style={{ marginTop: 10 }}>⚠️ Restart the bot process after saving to apply schedule changes.</p>
       </form>
     </div>
   );

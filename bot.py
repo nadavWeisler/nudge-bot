@@ -42,8 +42,25 @@ def _parse_chat_ids(raw: str) -> set[int]:
 
 _raw_ids = os.environ.get("ALLOWED_CHAT_IDS") or os.environ.get("ALLOWED_CHAT_ID") or ""
 ALLOWED_CHAT_IDS: set[int] = _parse_chat_ids(_raw_ids)
-NUDGE_HOUR = int(os.environ.get("NUDGE_HOUR", 8))
-NUDGE_MINUTE = int(os.environ.get("NUDGE_MINUTE", 0))
+
+def _parse_schedules(raw: str) -> list[dtime]:
+    times = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            h, m = entry.split(":")
+            times.append(dtime(hour=int(h), minute=int(m)))
+        except Exception:
+            logger.warning("Invalid schedule entry ignored: %r", entry)
+    return times
+
+_raw_schedules = (
+    os.environ.get("NUDGE_SCHEDULES") or
+    f"{os.environ.get('NUDGE_HOUR', '8')}:{os.environ.get('NUDGE_MINUTE', '0')}"
+)
+NUDGE_SCHEDULES: list[dtime] = _parse_schedules(_raw_schedules) or [dtime(hour=8, minute=0)]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -314,7 +331,8 @@ async def daily_nudge(ctx: ContextTypes.DEFAULT_TYPE):
 
 def main():
     db.init_db()
-    logger.info("NudgeBot starting (nudge at %02d:%02d)", NUDGE_HOUR, NUDGE_MINUTE)
+    schedules_str = ", ".join(t.strftime("%H:%M") for t in NUDGE_SCHEDULES)
+    logger.info("NudgeBot starting (nudges at %s, chats: %s)", schedules_str, ALLOWED_CHAT_IDS)
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -330,12 +348,9 @@ def main():
     app.add_handler(CommandHandler("nudge", cmd_nudge))
     app.add_handler(CallbackQueryHandler(on_button))
 
-    # Daily nudge job
-    app.job_queue.run_daily(
-        daily_nudge,
-        time=dtime(hour=NUDGE_HOUR, minute=NUDGE_MINUTE),
-        name="daily_nudge",
-    )
+    # Register one daily job per schedule
+    for i, t in enumerate(NUDGE_SCHEDULES):
+        app.job_queue.run_daily(daily_nudge, time=t, name=f"daily_nudge_{i}")
 
     logger.info("NudgeBot polling…")
     app.run_polling(drop_pending_updates=True)
