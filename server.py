@@ -95,10 +95,7 @@ def write_env(data: dict):
 @app.get("/api/stats")
 def get_stats():
     db.init_db()
-    return {
-        "open": len(db.list_tasks("open")),
-        "done": len(db.list_tasks("done")),
-    }
+    return db.stats()
 
 
 @app.get("/api/tasks")

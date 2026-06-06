@@ -14,126 +14,113 @@ function Alert({ msg, type = 'success', onClose }) {
   return <div className={`alert alert-${type}`}>{msg}</div>;
 }
 
-// ── Tasks tab ─────────────────────────────────────────────────────────────────
-function TasksTab() {
-  const [tasks, setTasks] = useState([]);
-  const [title, setTitle] = useState('');
-  const [assigned, setAssigned] = useState('');
-  const [adding, setAdding] = useState(false);
-  const [flash, setFlash] = useState(null);
-  const [showDone, setShowDone] = useState(false);
+function fmtDate(s) {
+  if (!s) return '';
+  return new Date(s + 'Z').toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
 
-  const load = useCallback(() =>
-    api('/api/tasks?status=' + (showDone ? 'done' : 'open')).then(setTasks).catch(() => {}),
-    [showDone]);
+// ── Monitor tab ───────────────────────────────────────────────────────────────
+function MonitorTab() {
+  const [tasks, setTasks]   = useState([]);
+  const [stats, setStats]   = useState(null);
+  const [filter, setFilter] = useState('open'); // open | done | all
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => { load(); }, [load]);
+  const load = useCallback(async () => {
+    const [t, s] = await Promise.all([
+      api('/api/tasks?status=' + (filter === 'all' ? 'open' : filter)).catch(() => []),
+      api('/api/stats').catch(() => null),
+    ]);
+    setTasks(t || []);
+    setStats(s);
+    setLoading(false);
+  }, [filter]);
 
-  function notify(msg, type = 'success') { setFlash({ msg, type }); }
+  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, [load]);
 
-  async function addTask(e) {
-    e.preventDefault();
-    if (!title.trim()) return;
-    setAdding(true);
-    try {
-      await api('/api/tasks', { method: 'POST', body: JSON.stringify({ title: title.trim(), assigned_to: assigned.trim() }) });
-      setTitle(''); setAssigned('');
-      await load();
-      notify('Task added ✅');
-    } catch (err) { notify(err.message, 'error'); }
-    finally { setAdding(false); }
-  }
-
-  async function completeTask(id) {
-    try {
-      await api(`/api/tasks/${id}/done`, { method: 'POST', body: JSON.stringify({ done_by: 'dashboard' }) });
-      await load();
-      notify('Marked done ✅');
-    } catch (err) { notify(err.message, 'error'); }
-  }
-
-  async function deleteTask(id) {
-    if (!confirm('Delete this task?')) return;
-    try {
-      await api(`/api/tasks/${id}`, { method: 'DELETE' });
-      await load();
-      notify('Deleted 🗑');
-    } catch (err) { notify(err.message, 'error'); }
-  }
-
-  function fmtDate(s) {
-    if (!s) return '';
-    return new Date(s + 'Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  }
-
-  const open = tasks.filter(t => t.status === 'open');
-  const done = tasks.filter(t => t.status === 'done');
+  const byAssignee = tasks.reduce((acc, t) => {
+    const k = t.assigned_to || '⬜ Unassigned';
+    (acc[k] = acc[k] || []).push(t);
+    return acc;
+  }, {});
 
   return (
     <div>
-      {flash && <Alert msg={flash.msg} type={flash.type} onClose={() => setFlash(null)} />}
-
-      {/* Add task */}
-      <div className="card">
-        <h2>Add Task</h2>
-        <form onSubmit={addTask}>
-          <div className="form-row">
-            <input className="input" placeholder="Task description…" value={title} onChange={e => setTitle(e.target.value)} required />
-            <input className="input" placeholder="Assign to (optional)" value={assigned} onChange={e => setAssigned(e.target.value)} style={{ maxWidth: 180 }} />
-            <button className="btn btn-primary" disabled={adding}>{adding ? 'Adding…' : '+ Add'}</button>
+      {/* Stats strip */}
+      {stats && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
+          <div className="stat-card">
+            <span className="stat-num" style={{ color: 'var(--primary)' }}>{stats.open}</span>
+            <span className="stat-label">Open</span>
           </div>
-        </form>
-      </div>
-
-      {/* Open tasks */}
-      <div className="card">
-        <div className="header">
-          <h2>Open Tasks <span className="badge badge-open">{open.length}</span></h2>
-          <button className="btn" onClick={load}>↻ Refresh</button>
-        </div>
-        {open.length === 0
-          ? <div className="empty">🎉 No open tasks!</div>
-          : open.map(t => (
-            <div className="task-row" key={t.id}>
-              <span className="task-id">#{t.id}</span>
-              <span className="task-title">{t.title}</span>
-              {t.assigned_to && <span className="task-assigned">→ {t.assigned_to}</span>}
-              <span className="task-date">{fmtDate(t.created_at)}</span>
-              <div className="task-actions">
-                <button className="btn btn-success" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => completeTask(t.id)}>✅</button>
-                <button className="btn btn-danger" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => deleteTask(t.id)}>🗑</button>
-              </div>
+          <div className="stat-card">
+            <span className="stat-num" style={{ color: 'var(--success)' }}>{stats.done}</span>
+            <span className="stat-label">Done</span>
+          </div>
+          {(stats.open_by_assignee || []).filter(r => r.assigned_to).map(r => (
+            <div className="stat-card" key={r.assigned_to}>
+              <span className="stat-num">{r.cnt}</span>
+              <span className="stat-label">{r.assigned_to}</span>
             </div>
           ))}
+          {(stats.done_by_person || []).map(r => (
+            <div className="stat-card" key={r.done_by} style={{ borderColor: 'rgba(34,197,94,0.3)' }}>
+              <span className="stat-num" style={{ color: 'var(--success)' }}>{r.cnt} ✅</span>
+              <span className="stat-label">{r.done_by}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Filter + refresh */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+        {['open', 'done'].map(f => (
+          <button key={f} className={`btn ${filter === f ? 'btn-primary' : ''}`}
+            onClick={() => setFilter(f)} style={{ textTransform: 'capitalize' }}>
+            {f === 'open' ? '🔵 Open' : '✅ Done'}
+          </button>
+        ))}
+        <button className="btn" onClick={load} style={{ marginLeft: 'auto' }}>↻</button>
+        <span style={{ color: 'var(--text2)', fontSize: 12 }}>Auto-refreshes every 15s</span>
       </div>
 
-      {/* Done tasks toggle */}
-      <div className="card">
-        <div className="header">
-          <h2>Completed Tasks <span className="badge badge-done">{done.length}</span></h2>
-          <button className="btn" onClick={() => setShowDone(v => !v)}>{showDone ? 'Hide' : 'Show'}</button>
-        </div>
-        {showDone && (
-          done.length === 0
-            ? <div className="empty">Nothing completed yet.</div>
-            : [...done].reverse().map(t => (
-              <div className="task-row" key={t.id} style={{ opacity: 0.6 }}>
+      {loading ? <p className="muted">Loading…</p> :
+        tasks.length === 0 ? <div className="empty">🎉 No tasks here.</div> :
+        filter === 'open' ? (
+          Object.entries(byAssignee).map(([person, group]) => (
+            <div key={person} className="card" style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <strong>{person}</strong>
+                <span className="badge badge-open">{group.length}</span>
+              </div>
+              {group.map(t => (
+                <div className="task-row" key={t.id}>
+                  <span className="task-id">#{t.id}</span>
+                  <span className="task-title">{t.title}</span>
+                  <span className="task-date">{fmtDate(t.created_at)}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text2)' }}>by {t.created_by}</span>
+                </div>
+              ))}
+            </div>
+          ))
+        ) : (
+          <div className="card">
+            {[...tasks].reverse().map(t => (
+              <div className="task-row" key={t.id} style={{ opacity: 0.75 }}>
                 <span className="task-id">#{t.id}</span>
                 <span className="task-title" style={{ textDecoration: 'line-through' }}>{t.title}</span>
-                {t.done_by && <span className="task-assigned">by {t.done_by}</span>}
                 <span className="task-date">{fmtDate(t.done_at)}</span>
-                <div className="task-actions">
-                  <button className="btn btn-danger" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => deleteTask(t.id)}>🗑</button>
-                </div>
+                <span style={{ fontSize: 11, color: 'var(--success)' }}>✅ {t.done_by}</span>
               </div>
-            ))
-        )}
-      </div>
+            ))}
+          </div>
+        )
+      }
     </div>
   );
 }
 
-// ── Settings tab ──────────────────────────────────────────────────────────────
+// ── ListEditor ────────────────────────────────────────────────────────────────
 function ListEditor({ label, items, onChange, placeholder, validate }) {
   const [draft, setDraft] = useState('');
   const [err, setErr] = useState('');
@@ -143,19 +130,15 @@ function ListEditor({ label, items, onChange, placeholder, validate }) {
     if (!v) return;
     if (validate) { const msg = validate(v); if (msg) { setErr(msg); return; } }
     if (items.includes(v)) { setErr('Already in list'); return; }
-    onChange([...items, v]);
-    setDraft(''); setErr('');
+    onChange([...items, v]); setDraft(''); setErr('');
   }
 
   return (
     <div className="form-group" style={{ gridColumn: '1 / -1' }}>
       <label className="label">{label}</label>
       {items.map((item, i) => (
-        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-          <span style={{
-            flex: 1, background: 'var(--bg3)', border: '1px solid var(--border)',
-            borderRadius: 'var(--radius)', padding: '7px 12px', fontSize: 13,
-          }}>{item}</span>
+        <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+          <span style={{ flex: 1, background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '7px 12px', fontSize: 13 }}>{item}</span>
           <button type="button" className="btn btn-danger" style={{ padding: '4px 10px' }}
             onClick={() => onChange(items.filter((_, j) => j !== i))}>✕</button>
         </div>
@@ -171,6 +154,7 @@ function ListEditor({ label, items, onChange, placeholder, validate }) {
   );
 }
 
+// ── Settings tab ──────────────────────────────────────────────────────────────
 function SettingsTab() {
   const [form, setForm] = useState({ bot_token: '', chat_ids: [], nudge_schedules: [] });
   const [loading, setLoading] = useState(true);
@@ -185,27 +169,22 @@ function SettingsTab() {
   }, []);
 
   async function save(e) {
-    e.preventDefault();
-    setSaving(true);
+    e.preventDefault(); setSaving(true);
     try {
       await api('/api/settings', { method: 'POST', body: JSON.stringify(form) });
-      notify('Settings saved ✅ (restart bot to apply)');
+      notify('Settings saved ✅ — restart bot to apply schedule changes');
     } catch (err) { notify(err.message, 'error'); }
     finally { setSaving(false); }
   }
 
   async function sendNudge() {
-    try {
-      await api('/api/nudge', { method: 'POST' });
-      notify('Nudge sent to all chats! 📣');
-    } catch (err) { notify(err.message, 'error'); }
+    try { await api('/api/nudge', { method: 'POST' }); notify('Nudge sent to all chats! 📣'); }
+    catch (err) { notify(err.message, 'error'); }
   }
 
-  function validateChatId(v) {
-    if (!/^-?\d+$/.test(v)) return 'Must be a numeric ID (e.g. 123456789 or -1001234567890)';
-  }
+  function validateChatId(v) { if (!/^-?\d+$/.test(v)) return 'Must be a numeric ID'; }
   function validateTime(v) {
-    if (!/^\d{1,2}:\d{2}$/.test(v)) return 'Use HH:MM format (e.g. 08:00)';
+    if (!/^\d{1,2}:\d{2}$/.test(v)) return 'Use HH:MM (e.g. 08:00)';
     const [h, m] = v.split(':').map(Number);
     if (h > 23 || m > 59) return 'Invalid time';
   }
@@ -216,16 +195,14 @@ function SettingsTab() {
     <div>
       {flash && <Alert msg={flash.msg} type={flash.type} onClose={() => setFlash(null)} />}
       <form onSubmit={save}>
-
         <div className="card">
           <h2>🤖 Bot Token</h2>
           <div className="form-group">
             <label className="label">Token (from @BotFather)</label>
             <div className="form-row" style={{ margin: 0 }}>
               <input className="input" type={showToken ? 'text' : 'password'}
-                value={form.bot_token ?? ''}
-                onChange={e => setForm(f => ({ ...f, bot_token: e.target.value }))}
-                placeholder="123456:ABC…" />
+                value={form.bot_token ?? ''} placeholder="123456:ABC…"
+                onChange={e => setForm(f => ({ ...f, bot_token: e.target.value }))} />
               <button type="button" className="btn" onClick={() => setShowToken(v => !v)} style={{ flexShrink: 0 }}>
                 {showToken ? '🙈' : '👁'}
               </button>
@@ -236,40 +213,30 @@ function SettingsTab() {
         <div className="card">
           <h2>👥 Allowed Chat IDs</h2>
           <p className="muted" style={{ marginBottom: 14 }}>
-            Add your Telegram user ID and your wife's. Send <code>/chatid</code> to the bot in DM to find yours.
+            Add your Telegram user ID and your wife's. Send <code>/chatid</code> to the bot in DM to get yours.
           </p>
-          <ListEditor
-            label="Chat IDs"
-            items={form.chat_ids}
+          <ListEditor label="Chat IDs" items={form.chat_ids}
             onChange={ids => setForm(f => ({ ...f, chat_ids: ids }))}
-            placeholder="e.g. 123456789"
-            validate={validateChatId}
-          />
+            placeholder="e.g. 123456789" validate={validateChatId} />
         </div>
 
         <div className="card">
           <h2>⏰ Daily Nudge Schedules</h2>
           <p className="muted" style={{ marginBottom: 14 }}>
-            Add one or more times — the bot sends all open tasks at each time every day.
+            Bot sends all open tasks at each time every day (to all allowed chats).
           </p>
-          <ListEditor
-            label="Nudge times"
-            items={form.nudge_schedules}
+          <ListEditor label="Nudge times" items={form.nudge_schedules}
             onChange={times => setForm(f => ({ ...f, nudge_schedules: times }))}
-            placeholder="HH:MM e.g. 08:00"
-            validate={validateTime}
-          />
+            placeholder="HH:MM e.g. 08:00" validate={validateTime} />
         </div>
 
         <div style={{ display: 'flex', gap: 10 }}>
           <button className="btn btn-primary" type="submit" disabled={saving}>
             {saving ? 'Saving…' : '💾 Save Settings'}
           </button>
-          <button className="btn" type="button" onClick={sendNudge}>
-            📣 Send Nudge Now
-          </button>
+          <button className="btn" type="button" onClick={sendNudge}>📣 Send Nudge Now</button>
         </div>
-        <p className="muted" style={{ marginTop: 10 }}>⚠️ Restart the bot process after saving to apply schedule changes.</p>
+        <p className="muted" style={{ marginTop: 10 }}>⚠️ Restart the bot after saving to apply schedule changes.</p>
       </form>
     </div>
   );
@@ -277,22 +244,20 @@ function SettingsTab() {
 
 // ── App shell ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState('tasks');
+  const [tab, setTab] = useState('monitor');
   const [stats, setStats] = useState(null);
 
-  useEffect(() => {
-    fetch('/api/stats').then(r => r.json()).then(setStats).catch(() => {});
-  }, []);
+  useEffect(() => { api('/api/stats').then(setStats).catch(() => {}); }, []);
 
   return (
     <div className="app">
       <div className="header">
         <div>
           <h1>🤖 NudgeBot</h1>
-          <p className="muted">Couples task manager dashboard</p>
+          <p className="muted">Admin dashboard — use the bot for all task work</p>
         </div>
         {stats && (
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 10 }}>
             <span className="badge badge-open">{stats.open} open</span>
             <span className="badge badge-done">{stats.done} done</span>
           </div>
@@ -300,11 +265,11 @@ export default function App() {
       </div>
 
       <div className="tabs">
-        <button className={`tab ${tab === 'tasks' ? 'active' : ''}`} onClick={() => setTab('tasks')}>📋 Tasks</button>
+        <button className={`tab ${tab === 'monitor' ? 'active' : ''}`} onClick={() => setTab('monitor')}>📊 Monitor</button>
         <button className={`tab ${tab === 'settings' ? 'active' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>
       </div>
 
-      {tab === 'tasks' && <TasksTab />}
+      {tab === 'monitor'  && <MonitorTab />}
       {tab === 'settings' && <SettingsTab />}
     </div>
   );

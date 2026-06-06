@@ -1,15 +1,19 @@
 """NudgeBot — couple task manager bot.
 
+Just send any text to add a task.
+
 Commands:
-  /add <task>          Add a task (optionally: /add <task> @name)
-  /list                Show all open tasks
-  /done <id>           Mark a task as done
-  /delete <id>         Delete a task
-  /assign <id> @name   Assign a task to someone
-  /done_list           Show recently completed tasks
-  /nudge               Manually trigger a nudge summary
-  /chatid              Show this chat's ID (for config)
-  /help                Show help
+  /list          Open tasks grouped by assignee (with ✅ buttons)
+  /mine          Tasks assigned to you
+  /theirs        Tasks assigned to others
+  /done <id>     Mark a task done
+  /delete <id>   Delete a task
+  /assign <id>   Pick who to assign (inline keyboard)
+  /stats         Summary: who has what, who completed what
+  /history       Recently completed tasks
+  /nudge         Send open tasks summary now
+  /chatid        Show this chat's ID
+  /help          Show help
 """
 import logging
 import os
@@ -37,11 +41,14 @@ logging.basicConfig(
 logger = logging.getLogger("nudgebot")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+
+
 def _parse_chat_ids(raw: str) -> set[int]:
     return {int(x.strip()) for x in raw.split(",") if x.strip().lstrip("-").isdigit()}
 
 _raw_ids = os.environ.get("ALLOWED_CHAT_IDS") or os.environ.get("ALLOWED_CHAT_ID") or ""
 ALLOWED_CHAT_IDS: set[int] = _parse_chat_ids(_raw_ids)
+
 
 def _parse_schedules(raw: str) -> list[dtime]:
     times = []
@@ -53,7 +60,7 @@ def _parse_schedules(raw: str) -> list[dtime]:
             h, m = entry.split(":")
             times.append(dtime(hour=int(h), minute=int(m)))
         except Exception:
-            logger.warning("Invalid schedule entry ignored: %r", entry)
+            logger.warning("Invalid schedule entry: %r", entry)
     return times
 
 _raw_schedules = (
@@ -66,156 +73,198 @@ NUDGE_SCHEDULES: list[dtime] = _parse_schedules(_raw_schedules) or [dtime(hour=8
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def display_name(user) -> str:
-    if user.first_name:
-        return user.first_name
-    return user.username or str(user.id)
-
-
-def task_line(t: dict) -> str:
-    assigned = f" → @{t['assigned_to']}" if t.get("assigned_to") else ""
-    return f"*#{t['id']}* {t['title']}{assigned}"
-
-
-def build_done_keyboard(task_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Done", callback_data=f"done:{task_id}"),
-        InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{task_id}"),
-    ]])
+    return user.first_name or user.username or str(user.id)
 
 
 async def guard(update: Update) -> bool:
-    """Return True if message is allowed."""
     if ALLOWED_CHAT_IDS and update.effective_chat.id not in ALLOWED_CHAT_IDS:
         await update.effective_message.reply_text("⛔ This bot is private.")
         return False
     return True
 
 
-def format_open_tasks(tasks: list[dict]) -> str:
+def seen(user):
+    """Upsert a user so they appear in assignment keyboards."""
+    db.upsert_user(user.id, display_name(user))
+
+
+def assign_keyboard(task_id: int, exclude_name: str = "") -> InlineKeyboardMarkup:
+    """Build assignment keyboard from known users + Unassigned."""
+    users = [u for u in db.list_users() if u["name"] != exclude_name]
+    buttons = [
+        InlineKeyboardButton(f"👤 {u['name']}", callback_data=f"assign:{task_id}:{u['name']}")
+        for u in users
+    ]
+    buttons.append(InlineKeyboardButton("⬜ Unassigned", callback_data=f"assign:{task_id}:"))
+    # Arrange in rows of 2
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
+def action_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Done", callback_data=f"done:{task_id}"),
+        InlineKeyboardButton("👤 Assign", callback_data=f"reassign:{task_id}"),
+        InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{task_id}"),
+    ]])
+
+
+def format_task_list(tasks: list[dict], title: str) -> str:
     if not tasks:
-        return "🎉 No open tasks! You're all caught up."
-    lines = ["📋 *Open tasks:*\n"]
+        return f"🎉 No tasks in *{title}*!"
+    lines = [f"*{title}*\n"]
     for t in tasks:
-        assigned = f" _{t['assigned_to']}_" if t.get("assigned_to") else ""
-        lines.append(f"• #{t['id']} {t['title']}{assigned}")
+        assigned = f"  →  _{t['assigned_to']}_" if t.get("assigned_to") else ""
+        lines.append(f"• *#{t['id']}* {t['title']}{assigned}")
     return "\n".join(lines)
+
+
+def grouped_list_message(tasks: list[dict], my_name: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Format tasks grouped by assignee with done buttons."""
+    if not tasks:
+        return "🎉 No open tasks! You're all caught up.", InlineKeyboardMarkup([])
+
+    mine    = [t for t in tasks if t.get("assigned_to") == my_name]
+    theirs  = [t for t in tasks if t.get("assigned_to") and t["assigned_to"] != my_name]
+    free    = [t for t in tasks if not t.get("assigned_to")]
+
+    lines = [f"📋 *Open tasks ({len(tasks)})*\n"]
+    buttons = []
+
+    def render_group(group, label):
+        if not group:
+            return
+        lines.append(f"\n{label}")
+        for t in group:
+            lines.append(f"  *#{t['id']}* {t['title']}")
+            buttons.append([InlineKeyboardButton(
+                f"✅ #{t['id']} {t['title'][:28]}",
+                callback_data=f"done:{t['id']}"
+            )])
+
+    render_group(mine, "👤 *Yours*")
+    render_group(theirs, "👥 *Theirs*")
+    render_group(free, "⬜ *Unassigned*")
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
+    if not await guard(update): return
+    seen(update.effective_user)
     await update.message.reply_text(
         "👋 *NudgeBot* is ready!\n\n"
-        "I help you and your partner stay on top of shared tasks.\n\n"
-        "• `/add Buy milk` — add a task\n"
-        "• `/add Fix shelf @Nadav` — add & assign\n"
-        "• `/list` — see open tasks\n"
-        "• `/done 3` — mark task #3 done\n"
-        "• `/nudge` — ping everyone with open tasks\n"
-        "• `/help` — full command list",
+        "Just *send any message* to add a task — I'll ask who it's for.\n\n"
+        "📋 /list — all open tasks\n"
+        "👤 /mine — your tasks\n"
+        "👥 /theirs — tasks for others\n"
+        "📊 /stats — who has what\n"
+        "📣 /nudge — send reminder now\n"
+        "❓ /help — all commands",
         parse_mode="Markdown",
     )
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
+    if not await guard(update): return
+    seen(update.effective_user)
     await update.message.reply_text(
         "*NudgeBot commands:*\n\n"
-        "➕ `/add <task>` — add a task\n"
-        "➕ `/add <task> @name` — add & assign to someone\n"
-        "📋 `/list` — show open tasks\n"
-        "✅ `/done <id>` — mark task done\n"
-        "🗑 `/delete <id>` — delete a task\n"
-        "👤 `/assign <id> @name` — reassign a task\n"
-        "🕐 `/done_list` — recently completed tasks\n"
-        "📣 `/nudge` — send open tasks reminder\n"
-        "🆔 `/chatid` — show this chat's ID",
+        "💬 Just type anything → adds a task\n\n"
+        "📋 /list — open tasks (grouped by assignee)\n"
+        "👤 /mine — your tasks only\n"
+        "👥 /theirs — tasks assigned to others\n"
+        "✅ /done `<id>` — mark task done\n"
+        "🗑 /delete `<id>` — delete a task\n"
+        "👤 /assign `<id>` — reassign (shows picker)\n"
+        "🕐 /history — recently completed\n"
+        "📊 /stats — completion summary\n"
+        "📣 /nudge — send reminder now\n"
+        "🆔 /chatid — this chat's ID",
         parse_mode="Markdown",
     )
 
 
 async def cmd_chatid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Chat ID: `{update.effective_chat.id}`", parse_mode="Markdown")
-
-
-async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
-    text = " ".join(ctx.args).strip()
-    if not text:
-        await update.message.reply_text("Usage: `/add <task description>`", parse_mode="Markdown")
-        return
-
-    # Parse optional trailing @name assignment
-    assigned = ""
-    m = re.search(r"\s+@(\S+)$", text)
-    if m:
-        assigned = m.group(1)
-        text = text[: m.start()].strip()
-
-    who = display_name(update.effective_user)
-    task = db.add_task(text, created_by=who, assigned_to=assigned)
-    assign_str = f" → _{assigned}_" if assigned else ""
     await update.message.reply_text(
-        f"✅ Added *#{task['id']}* {task['title']}{assign_str}\n\nPress done when finished:",
+        f"🆔 Chat ID: `{update.effective_chat.id}`\n"
+        f"👤 Your ID: `{update.effective_user.id}`",
         parse_mode="Markdown",
-        reply_markup=build_done_keyboard(task["id"]),
     )
 
 
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
+    if not await guard(update): return
+    seen(update.effective_user)
     tasks = db.list_tasks("open")
-    msg = format_open_tasks(tasks)
-    if not tasks:
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        return
+    my_name = display_name(update.effective_user)
+    text, kb = grouped_list_message(tasks, my_name)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
 
-    # Build inline buttons for each task
-    buttons = [
-        [InlineKeyboardButton(f"✅ #{t['id']} {t['title'][:30]}", callback_data=f"done:{t['id']}")]
-        for t in tasks
-    ]
+
+async def cmd_mine(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update): return
+    seen(update.effective_user)
+    my_name = display_name(update.effective_user)
+    tasks = [t for t in db.list_tasks("open") if t.get("assigned_to") == my_name]
+    if not tasks:
+        await update.message.reply_text("🎉 No tasks assigned to you!", parse_mode="Markdown")
+        return
+    lines = [f"👤 *Your tasks ({len(tasks)}):*\n"]
+    buttons = []
+    for t in tasks:
+        lines.append(f"• *#{t['id']}* {t['title']}")
+        buttons.append([InlineKeyboardButton(f"✅ #{t['id']} {t['title'][:28]}", callback_data=f"done:{t['id']}")])
     await update.message.reply_text(
-        msg, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        "\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def cmd_theirs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update): return
+    seen(update.effective_user)
+    my_name = display_name(update.effective_user)
+    tasks = [t for t in db.list_tasks("open") if t.get("assigned_to") and t["assigned_to"] != my_name]
+    if not tasks:
+        await update.message.reply_text("✨ No tasks assigned to others right now.", parse_mode="Markdown")
+        return
+    lines = [f"👥 *Their tasks ({len(tasks)}):*\n"]
+    buttons = []
+    for t in tasks:
+        lines.append(f"• *#{t['id']}* {t['title']} → _{t['assigned_to']}_")
+        buttons.append([InlineKeyboardButton(f"✅ #{t['id']} {t['title'][:28]}", callback_data=f"done:{t['id']}")])
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
 async def cmd_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
+    if not await guard(update): return
+    seen(update.effective_user)
     if not ctx.args or not ctx.args[0].isdigit():
-        await update.message.reply_text("Usage: `/done <task_id>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: /done `<id>`", parse_mode="Markdown")
         return
-
     task_id = int(ctx.args[0])
     who = display_name(update.effective_user)
     task = db.complete_task(task_id, who)
-    if not task:
+    if not task or task["status"] != "done":
         await update.message.reply_text(f"Task #{task_id} not found or already done.")
         return
-    if task["status"] != "done":
-        await update.message.reply_text(f"Task #{task_id} not found or already done.")
-        return
-
-    remaining = db.list_tasks("open")
-    remaining_str = f"\n\n{len(remaining)} task(s) still open." if remaining else "\n\n🎉 All done!"
+    remaining = len(db.list_tasks("open"))
+    tail = f"\n_{remaining} task(s) still open._" if remaining else "\n\n🎉 *All done!*"
     await update.message.reply_text(
-        f"✅ *{who}* marked done: _{task['title']}_{remaining_str}",
+        f"✅ *{who}* marked done:\n_{task['title']}_{tail}",
         parse_mode="Markdown",
     )
 
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
+    if not await guard(update): return
+    seen(update.effective_user)
     if not ctx.args or not ctx.args[0].isdigit():
-        await update.message.reply_text("Usage: `/delete <task_id>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: /delete `<id>`", parse_mode="Markdown")
         return
     task_id = int(ctx.args[0])
     task = db.get_task(task_id)
@@ -227,61 +276,75 @@ async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_assign(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
-    if len(ctx.args) < 2 or not ctx.args[0].isdigit():
-        await update.message.reply_text("Usage: `/assign <id> @name`", parse_mode="Markdown")
+    if not await guard(update): return
+    seen(update.effective_user)
+    if not ctx.args or not ctx.args[0].isdigit():
+        await update.message.reply_text("Usage: /assign `<id>`", parse_mode="Markdown")
         return
     task_id = int(ctx.args[0])
-    name = ctx.args[1].lstrip("@")
-    task = db.assign_task(task_id, name)
-    if not task:
+    task = db.get_task(task_id)
+    if not task or task["status"] != "open":
         await update.message.reply_text(f"Task #{task_id} not found.")
         return
     await update.message.reply_text(
-        f"👤 Task *#{task_id}* assigned to _{name}_", parse_mode="Markdown"
+        f"👤 Who should handle *#{task_id}* _{task['title']}_?",
+        parse_mode="Markdown",
+        reply_markup=assign_keyboard(task_id),
     )
 
 
-async def cmd_done_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
-    tasks = db.list_tasks("done")[-10:]  # last 10
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update): return
+    seen(update.effective_user)
+    s = db.stats()
+    lines = [f"📊 *Task Stats*\n\n🔵 Open: *{s['open']}*   ✅ Done: *{s['done']}*"]
+
+    if s["open_by_assignee"]:
+        lines.append("\n*Open by person:*")
+        for row in s["open_by_assignee"]:
+            name = row["assigned_to"] or "Unassigned"
+            lines.append(f"  • {name}: {row['cnt']}")
+
+    if s["done_by_person"]:
+        lines.append("\n*Completed by:*")
+        for row in s["done_by_person"]:
+            lines.append(f"  • {row['done_by']}: {row['cnt']} ✅")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update): return
+    seen(update.effective_user)
+    tasks = db.list_tasks("done")[-15:]
     if not tasks:
         await update.message.reply_text("No completed tasks yet.")
         return
-    lines = ["✅ *Recently completed:*\n"]
+    lines = [f"🕐 *Recently completed ({len(tasks)}):*\n"]
     for t in reversed(tasks):
-        by = f" by _{t['done_by']}_" if t.get("done_by") else ""
-        lines.append(f"• ~~{t['title']}~~{by}")
+        by = f" _by {t['done_by']}_" if t.get("done_by") else ""
+        lines.append(f"• ~{t['title']}~{by}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_nudge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
+    if not await guard(update): return
+    seen(update.effective_user)
     await send_nudge(ctx, chat_id=update.effective_chat.id)
 
 
-async def send_nudge(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    tasks = db.list_tasks("open")
-    if not tasks:
-        await ctx.bot.send_message(chat_id, "🎉 No open tasks! All clear.")
-        return
-    lines = [f"📣 *Daily nudge — {len(tasks)} open task(s):*\n"]
-    for t in tasks:
-        assigned = f" → _{t['assigned_to']}_" if t.get("assigned_to") else ""
-        lines.append(f"• #{t['id']} {t['title']}{assigned}")
+# ── Plain text → add task ─────────────────────────────────────────────────────
 
-    buttons = [
-        [InlineKeyboardButton(f"✅ #{t['id']} {t['title'][:30]}", callback_data=f"done:{t['id']}")]
-        for t in tasks
-    ]
-    await ctx.bot.send_message(
-        chat_id,
-        "\n".join(lines),
+async def on_plain_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update): return
+    seen(update.effective_user)
+    text = update.message.text.strip()
+    who = display_name(update.effective_user)
+    task = db.add_task(text, created_by=who)
+    await update.message.reply_text(
+        f"📝 *Added:* _{task['title']}_\n\nWho should do this?",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=assign_keyboard(task["id"]),
     )
 
 
@@ -290,21 +353,47 @@ async def send_nudge(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int):
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    action, task_id_str = query.data.split(":", 1)
-    task_id = int(task_id_str)
     who = display_name(query.from_user)
+    seen(query.from_user)
+
+    parts = query.data.split(":", 2)
+    action = parts[0]
+    task_id = int(parts[1])
 
     if action == "done":
         task = db.complete_task(task_id, who)
         if not task or task["status"] != "done":
-            await query.edit_message_text("Task not found or already done.")
+            await query.edit_message_text("Already done or not found.")
             return
-        remaining = db.list_tasks("open")
-        remaining_str = f"\n\n{len(remaining)} task(s) still open." if remaining else "\n\n🎉 All done!"
+        remaining = len(db.list_tasks("open"))
+        tail = f"\n_{remaining} task(s) still open._" if remaining else "\n\n🎉 *All done!*"
         await query.edit_message_text(
-            f"✅ *{who}* marked done: _{task['title']}_{remaining_str}",
+            f"✅ *{who}* marked done:\n_{task['title']}_{tail}",
             parse_mode="Markdown",
+        )
+
+    elif action == "assign":
+        name = parts[2] if len(parts) > 2 else ""
+        task = db.assign_task(task_id, name)
+        if not task:
+            await query.edit_message_text("Task not found.")
+            return
+        label = f"_{name}_" if name else "_nobody (unassigned)_"
+        await query.edit_message_text(
+            f"👤 *#{task_id}* _{task['title']}_\nAssigned to {label}",
+            parse_mode="Markdown",
+            reply_markup=action_keyboard(task_id),
+        )
+
+    elif action == "reassign":
+        task = db.get_task(task_id)
+        if not task:
+            await query.edit_message_text("Task not found.")
+            return
+        await query.edit_message_text(
+            f"👤 Reassign *#{task_id}* _{task['title']}_\nPick someone:",
+            parse_mode="Markdown",
+            reply_markup=assign_keyboard(task_id),
         )
 
     elif action == "delete":
@@ -313,17 +402,38 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Task not found.")
             return
         db.delete_task(task_id)
-        await query.edit_message_text(f"🗑 Deleted: _{task['title']}_", parse_mode="Markdown")
+        await query.edit_message_text(f"🗑 *{who}* deleted: _{task['title']}_", parse_mode="Markdown")
 
 
-# ── Scheduled daily nudge ────────────────────────────────────────────────────
+# ── Scheduled nudge ───────────────────────────────────────────────────────────
+
+async def send_nudge(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    tasks = db.list_tasks("open")
+    if not tasks:
+        await ctx.bot.send_message(chat_id, "🎉 No open tasks! All clear.")
+        return
+
+    lines = [f"📣 *Nudge — {len(tasks)} open task(s):*\n"]
+    buttons = []
+    for t in tasks:
+        assigned = f" → _{t['assigned_to']}_" if t.get("assigned_to") else ""
+        lines.append(f"• *#{t['id']}* {t['title']}{assigned}")
+        buttons.append([InlineKeyboardButton(
+            f"✅ #{t['id']} {t['title'][:28]}", callback_data=f"done:{t['id']}"
+        )])
+
+    await ctx.bot.send_message(
+        chat_id, "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
 
 async def daily_nudge(ctx: ContextTypes.DEFAULT_TYPE):
     if not ALLOWED_CHAT_IDS:
-        logger.warning("ALLOWED_CHAT_IDS not set — skipping scheduled nudge")
+        logger.warning("ALLOWED_CHAT_IDS not set — skipping nudge")
         return
     for chat_id in ALLOWED_CHAT_IDS:
-        logger.info("Sending daily nudge to chat %s", chat_id)
         await send_nudge(ctx, chat_id=chat_id)
 
 
@@ -332,23 +442,26 @@ async def daily_nudge(ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     db.init_db()
     schedules_str = ", ".join(t.strftime("%H:%M") for t in NUDGE_SCHEDULES)
-    logger.info("NudgeBot starting (nudges at %s, chats: %s)", schedules_str, ALLOWED_CHAT_IDS)
+    logger.info("NudgeBot starting — nudges at %s — chats: %s", schedules_str, ALLOWED_CHAT_IDS)
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("chatid", cmd_chatid))
-    app.add_handler(CommandHandler("add", cmd_add))
-    app.add_handler(CommandHandler("list", cmd_list))
-    app.add_handler(CommandHandler("done", cmd_done))
-    app.add_handler(CommandHandler("delete", cmd_delete))
-    app.add_handler(CommandHandler("assign", cmd_assign))
-    app.add_handler(CommandHandler("done_list", cmd_done_list))
-    app.add_handler(CommandHandler("nudge", cmd_nudge))
+    app.add_handler(CommandHandler("start",   cmd_start))
+    app.add_handler(CommandHandler("help",    cmd_help))
+    app.add_handler(CommandHandler("chatid",  cmd_chatid))
+    app.add_handler(CommandHandler("list",    cmd_list))
+    app.add_handler(CommandHandler("mine",    cmd_mine))
+    app.add_handler(CommandHandler("theirs",  cmd_theirs))
+    app.add_handler(CommandHandler("done",    cmd_done))
+    app.add_handler(CommandHandler("delete",  cmd_delete))
+    app.add_handler(CommandHandler("assign",  cmd_assign))
+    app.add_handler(CommandHandler("stats",   cmd_stats))
+    app.add_handler(CommandHandler("history", cmd_history))
+    app.add_handler(CommandHandler("nudge",   cmd_nudge))
     app.add_handler(CallbackQueryHandler(on_button))
+    # Plain text → add task (must be last)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_plain_text))
 
-    # Register one daily job per schedule
     for i, t in enumerate(NUDGE_SCHEDULES):
         app.job_queue.run_daily(daily_nudge, time=t, name=f"daily_nudge_{i}")
 
