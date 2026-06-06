@@ -42,3 +42,29 @@ pm2 save
 | `/done_list` | Show recently completed tasks |
 | `/nudge` | Manually trigger the open-tasks reminder |
 | `/chatid` | Show this chat's ID |
+
+## Dashboard
+
+A web dashboard for managing tasks and configuration.
+
+### Build & Run
+
+```bash
+# Build the React UI (once)
+cd dashboard && npm install && npm run build && cd ..
+
+# Start the dashboard server (port 5050)
+uvicorn server:app --host 0.0.0.0 --port 5050
+
+# Or with PM2 (alongside the bot)
+pm2 start bot.py --name nudge-bot --interpreter python3
+pm2 start "uvicorn server:app --host 0.0.0.0 --port 5050" --name nudge-dashboard
+pm2 save
+```
+
+Open: **http://localhost:5050** (or your Tailscale IP: http://100.107.213.96:5050)
+
+### Dashboard features
+- 📋 **Tasks tab** — add, complete, delete tasks without Telegram
+- ⚙️ **Settings tab** — configure bot token, chat ID, nudge time
+- 📣 **Send Nudge Now** button — trigger a nudge directly from the browser

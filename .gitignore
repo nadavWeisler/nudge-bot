@@ -2,3 +2,6 @@
 nudge.db
 __pycache__/
 *.pyc
+static/
+dashboard/node_modules/
+dashboard/dist/
