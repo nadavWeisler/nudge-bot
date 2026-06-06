@@ -37,7 +37,11 @@ logging.basicConfig(
 logger = logging.getLogger("nudgebot")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-ALLOWED_CHAT_ID = int(os.environ["ALLOWED_CHAT_ID"]) if os.environ.get("ALLOWED_CHAT_ID") else None
+def _parse_chat_ids(raw: str) -> set[int]:
+    return {int(x.strip()) for x in raw.split(",") if x.strip().lstrip("-").isdigit()}
+
+_raw_ids = os.environ.get("ALLOWED_CHAT_IDS") or os.environ.get("ALLOWED_CHAT_ID") or ""
+ALLOWED_CHAT_IDS: set[int] = _parse_chat_ids(_raw_ids)
 NUDGE_HOUR = int(os.environ.get("NUDGE_HOUR", 8))
 NUDGE_MINUTE = int(os.environ.get("NUDGE_MINUTE", 0))
 
@@ -64,7 +68,7 @@ def build_done_keyboard(task_id: int) -> InlineKeyboardMarkup:
 
 async def guard(update: Update) -> bool:
     """Return True if message is allowed."""
-    if ALLOWED_CHAT_ID and update.effective_chat.id != ALLOWED_CHAT_ID:
+    if ALLOWED_CHAT_IDS and update.effective_chat.id not in ALLOWED_CHAT_IDS:
         await update.effective_message.reply_text("⛔ This bot is private.")
         return False
     return True
@@ -298,11 +302,12 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Scheduled daily nudge ────────────────────────────────────────────────────
 
 async def daily_nudge(ctx: ContextTypes.DEFAULT_TYPE):
-    if not ALLOWED_CHAT_ID:
-        logger.warning("ALLOWED_CHAT_ID not set — skipping scheduled nudge")
+    if not ALLOWED_CHAT_IDS:
+        logger.warning("ALLOWED_CHAT_IDS not set — skipping scheduled nudge")
         return
-    logger.info("Sending daily nudge to chat %s", ALLOWED_CHAT_ID)
-    await send_nudge(ctx, chat_id=ALLOWED_CHAT_ID)
+    for chat_id in ALLOWED_CHAT_IDS:
+        logger.info("Sending daily nudge to chat %s", chat_id)
+        await send_nudge(ctx, chat_id=chat_id)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

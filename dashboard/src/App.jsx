@@ -136,7 +136,7 @@ function TasksTab() {
 // ── Settings tab ──────────────────────────────────────────────────────────────
 function SettingsTab() {
   const [form, setForm] = useState({
-    BOT_TOKEN: '', ALLOWED_CHAT_ID: '', NUDGE_HOUR: '8', NUDGE_MINUTE: '0',
+    BOT_TOKEN: '', ALLOWED_CHAT_IDS: '', NUDGE_HOUR: '8', NUDGE_MINUTE: '0',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -205,7 +205,7 @@ function SettingsTab() {
                 </button>
               </div>
             </div>
-            {field('ALLOWED_CHAT_ID', 'Allowed Chat ID', { placeholder: 'e.g. -1001234567890' })}
+            {field('ALLOWED_CHAT_IDS', 'Allowed Chat IDs (comma-separated)', { placeholder: 'e.g. 123456789, 987654321' })}
           </div>
         </div>
 

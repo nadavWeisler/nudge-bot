@@ -22,7 +22,7 @@ app = FastAPI(title="NudgeBot Dashboard")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-ENV_KEYS = ["BOT_TOKEN", "ALLOWED_CHAT_ID", "NUDGE_HOUR", "NUDGE_MINUTE"]
+ENV_KEYS = ["BOT_TOKEN", "ALLOWED_CHAT_IDS", "NUDGE_HOUR", "NUDGE_MINUTE"]
 
 
 def read_env() -> dict:
@@ -123,7 +123,7 @@ def get_settings():
 
 class SettingsBody(BaseModel):
     BOT_TOKEN: str = ""
-    ALLOWED_CHAT_ID: str = ""
+    ALLOWED_CHAT_IDS: str = ""
     NUDGE_HOUR: str = "8"
     NUDGE_MINUTE: str = "0"
 
@@ -140,9 +140,10 @@ async def send_nudge():
     import httpx
     cfg = read_env()
     token = cfg.get("BOT_TOKEN", "")
-    chat_id = cfg.get("ALLOWED_CHAT_ID", "")
-    if not token or not chat_id:
-        raise HTTPException(400, "BOT_TOKEN and ALLOWED_CHAT_ID must be set")
+    raw_ids = cfg.get("ALLOWED_CHAT_IDS", "")
+    chat_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
+    if not token or not chat_ids:
+        raise HTTPException(400, "BOT_TOKEN and ALLOWED_CHAT_IDS must be set")
 
     db.init_db()
     tasks = db.list_tasks("open")
@@ -156,12 +157,13 @@ async def send_nudge():
         text = "\n".join(lines)
 
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-        )
-        if not r.is_success:
-            raise HTTPException(502, f"Telegram error: {r.text}")
+        for chat_id in chat_ids:
+            r = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            )
+            if not r.is_success:
+                raise HTTPException(502, f"Telegram error for {chat_id}: {r.text}")
 
     return {"ok": True}
 
