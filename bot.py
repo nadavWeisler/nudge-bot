@@ -21,7 +21,13 @@ import re
 from datetime import time as dtime
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -68,6 +74,17 @@ _raw_schedules = (
     f"{os.environ.get('NUDGE_HOUR', '8')}:{os.environ.get('NUDGE_MINUTE', '0')}"
 )
 NUDGE_SCHEDULES: list[dtime] = _parse_schedules(_raw_schedules) or [dtime(hour=8, minute=0)]
+
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["📋 List tasks", "👤 My tasks"],
+        ["📊 Stats",      "🕐 History"],
+        ["📣 Nudge now",  "❓ Help"],
+    ],
+    resize_keyboard=True,
+    input_field_placeholder="Type a task to add it…",
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -156,14 +173,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     seen(update.effective_user)
     await update.message.reply_text(
         "👋 *NudgeBot* is ready!\n\n"
-        "Just *send any message* to add a task — I'll ask who it's for.\n\n"
-        "📋 /list — all open tasks\n"
-        "👤 /mine — your tasks\n"
-        "👥 /theirs — tasks for others\n"
-        "📊 /stats — who has what\n"
-        "📣 /nudge — send reminder now\n"
-        "❓ /help — all commands",
+        "Just *type anything* to add a task — I'll ask who it's for.\n\n"
+        "Use the buttons below or type `/help` to see all commands.",
         parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
@@ -172,7 +185,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     seen(update.effective_user)
     await update.message.reply_text(
         "*NudgeBot commands:*\n\n"
-        "💬 Just type anything → adds a task\n\n"
+        "💬 *Just type anything* → adds a new task\n\n"
         "📋 /list — open tasks (grouped by assignee)\n"
         "👤 /mine — your tasks only\n"
         "👥 /theirs — tasks assigned to others\n"
@@ -184,6 +197,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "📣 /nudge — send reminder now\n"
         "🆔 /chatid — this chat's ID",
         parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
@@ -339,6 +353,20 @@ async def on_plain_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await guard(update): return
     seen(update.effective_user)
     text = update.message.text.strip()
+
+    # Handle reply-keyboard shortcut buttons
+    shortcuts = {
+        "📋 list tasks":  cmd_list,
+        "👤 my tasks":    cmd_mine,
+        "📊 stats":       cmd_stats,
+        "🕐 history":     cmd_history,
+        "📣 nudge now":   cmd_nudge,
+        "❓ help":        cmd_help,
+    }
+    if text.lower() in shortcuts:
+        await shortcuts[text.lower()](update, ctx)
+        return
+
     who = display_name(update.effective_user)
     task = db.add_task(text, created_by=who)
     await update.message.reply_text(
@@ -445,6 +473,23 @@ def main():
     logger.info("NudgeBot starting — nudges at %s — chats: %s", schedules_str, ALLOWED_CHAT_IDS)
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    async def post_init(application):
+        await application.bot.set_my_commands([
+            BotCommand("list",    "📋 Open tasks grouped by assignee"),
+            BotCommand("mine",    "👤 Tasks assigned to you"),
+            BotCommand("theirs",  "👥 Tasks assigned to others"),
+            BotCommand("done",    "✅ Mark task done — /done <id>"),
+            BotCommand("assign",  "👤 Reassign a task — /assign <id>"),
+            BotCommand("delete",  "🗑 Delete a task — /delete <id>"),
+            BotCommand("stats",   "📊 Completion summary"),
+            BotCommand("history", "🕐 Recently completed tasks"),
+            BotCommand("nudge",   "📣 Send open tasks reminder now"),
+            BotCommand("chatid",  "🆔 Show this chat's ID"),
+            BotCommand("help",    "❓ All commands"),
+        ])
+
+    app.post_init = post_init
 
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("help",    cmd_help))
