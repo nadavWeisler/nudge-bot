@@ -78,9 +78,8 @@ NUDGE_SCHEDULES: list[dtime] = _parse_schedules(_raw_schedules) or [dtime(hour=8
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["📋 List tasks", "👤 My tasks"],
-        ["📊 Stats",      "🕐 History"],
-        ["📣 Nudge now",  "❓ Help"],
+        ["📋 Tasks", "👤 Mine"],
+        ["📊 Stats",  "❓ Help"],
     ],
     resize_keyboard=True,
     input_field_placeholder="Type a task to add it…",
@@ -105,15 +104,26 @@ def seen(user):
     db.upsert_user(user.id, display_name(user))
 
 
+def pending_assign_keyboard(title_key: str) -> InlineKeyboardMarkup:
+    """Ask who the task is for — uses known users + Anyone."""
+    users = db.list_users()
+    buttons = [
+        InlineKeyboardButton(f"👤 {u['name']}", callback_data=f"new_assign:{title_key}:{u['name']}")
+        for u in users
+    ]
+    buttons.append(InlineKeyboardButton("⬜ Anyone", callback_data=f"new_assign:{title_key}:"))
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
 def assign_keyboard(task_id: int, exclude_name: str = "") -> InlineKeyboardMarkup:
-    """Build assignment keyboard from known users + Unassigned."""
+    """Build reassignment keyboard from known users + Unassigned."""
     users = [u for u in db.list_users() if u["name"] != exclude_name]
     buttons = [
         InlineKeyboardButton(f"👤 {u['name']}", callback_data=f"assign:{task_id}:{u['name']}")
         for u in users
     ]
     buttons.append(InlineKeyboardButton("⬜ Unassigned", callback_data=f"assign:{task_id}:"))
-    # Arrange in rows of 2
     rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
     return InlineKeyboardMarkup(rows)
 
@@ -356,23 +366,21 @@ async def on_plain_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Handle reply-keyboard shortcut buttons
     shortcuts = {
-        "📋 list tasks":  cmd_list,
-        "👤 my tasks":    cmd_mine,
-        "📊 stats":       cmd_stats,
-        "🕐 history":     cmd_history,
-        "📣 nudge now":   cmd_nudge,
-        "❓ help":        cmd_help,
+        "📋 tasks": cmd_list,
+        "👤 mine":  cmd_mine,
+        "📊 stats": cmd_stats,
+        "❓ help":  cmd_help,
     }
     if text.lower() in shortcuts:
         await shortcuts[text.lower()](update, ctx)
         return
 
-    who = display_name(update.effective_user)
-    task = db.add_task(text, created_by=who)
+    # Store pending task title in user_data, ask who it's for
+    ctx.user_data["pending_task"] = text
     await update.message.reply_text(
-        f"📝 *Added:* _{task['title']}_\n\nWho should do this?",
+        f"📝 *{text}*\n\nWho should do this?",
         parse_mode="Markdown",
-        reply_markup=assign_keyboard(task["id"]),
+        reply_markup=pending_assign_keyboard(str(update.effective_user.id)),
     )
 
 
@@ -386,6 +394,25 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     parts = query.data.split(":", 2)
     action = parts[0]
+
+    # ── New task assignment (create-then-assign flow) ──────────────────────────
+    if action == "new_assign":
+        user_id_key = parts[1]
+        assignee = parts[2] if len(parts) > 2 else ""
+        # Retrieve pending task from that user's context (find via user_data)
+        title = ctx.user_data.get("pending_task")
+        if not title:
+            await query.edit_message_text("⚠️ Task timed out — please type it again.")
+            return
+        ctx.user_data.pop("pending_task", None)
+        task = db.add_task(title, created_by=who, assigned_to=assignee or None)
+        label = f"👤 _{assignee}_" if assignee else "⬜ _Anyone_"
+        await query.edit_message_text(
+            f"✅ *Task added!*\n\n📝 _{task['title']}_\n→ {label}",
+            parse_mode="Markdown",
+        )
+        return
+
     task_id = int(parts[1])
 
     if action == "done":
